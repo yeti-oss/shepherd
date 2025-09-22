@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test-and-build:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+
+    - name: Compute version and build numbers
+      id: vars
+      run: |
+        VERSION="$(git describe --tags --abbrev=0 2>/dev/null || echo '0.0.1')"
+        VERSION="${VERSION#v}"
+        BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
+        SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        echo "build_number=${BUILD_NUMBER}" >> "$GITHUB_OUTPUT"
+        echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+        echo "Resolved VERSION=${VERSION} BUILD_NUMBER=${BUILD_NUMBER} SHORT_SHA=${SHORT_SHA}"
+
+    - name: Install dependencies
+      run: |
+        gem install xcpretty
+    
+    - name: Run tests
+      run: |
+        set -o pipefail
+        xcodebuild test \
+          -scheme "Shepherd" \
+          -configuration Debug \
+          -destination 'platform=macOS' \
+          MARKETING_VERSION="${{ steps.vars.outputs.version }}" \
+          CURRENT_PROJECT_VERSION="${{ steps.vars.outputs.build_number }}" \
+          | xcpretty --color --report junit --output build/reports/junit.xml
+      shell: bash
+
+    - name: Build app
+      run: |
+        set -o pipefail
+        xcodebuild clean build \
+          -scheme "Shepherd" \
+          -configuration Release \
+          -destination 'platform=macOS' \
+          BUILD_DIR="$GITHUB_WORKSPACE/build" \
+          MARKETING_VERSION="${{ steps.vars.outputs.version }}" \
+          CURRENT_PROJECT_VERSION="${{ steps.vars.outputs.build_number }}" \
+          | xcpretty --color
+      shell: bash
+
+    - name: Ad-hoc sign app
+      run: |
+        APP_PATH="$(/usr/bin/find "$GITHUB_WORKSPACE/build/Release" -name '*.app' -maxdepth 1 -print -quit)"
+        if [ -z "$APP_PATH" ]; then echo "App not found in build/Release"; exit 1; fi
+        /usr/bin/codesign --force --deep --options runtime --sign - "$APP_PATH"
+        /usr/bin/codesign -dv --verbose=4 "$APP_PATH" 2>&1 | /usr/bin/tee /dev/stderr
+
+    - name: Create zip archive
+      run: |
+        APP_PATH="$(/usr/bin/find "$GITHUB_WORKSPACE/build/Release" -name '*.app' -maxdepth 1 -print -quit)"
+        if [ -z "$APP_PATH" ]; then echo "App not found in build/Release"; exit 1; fi
+        ARCHIVE_NAME="Shepherd-macOS-${{ steps.vars.outputs.version }}+${{ steps.vars.outputs.build_number }}-${{ steps.vars.outputs.short_sha }}.zip"
+        /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$GITHUB_WORKSPACE/${ARCHIVE_NAME}"
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Shepherd-${{ steps.vars.outputs.version }}+${{ steps.vars.outputs.build_number }}-${{ steps.vars.outputs.short_sha }}
+        path: ${{ github.workspace }}/Shepherd-macOS-${{ steps.vars.outputs.version }}+${{ steps.vars.outputs.build_number }}-${{ steps.vars.outputs.short_sha }}.zip
